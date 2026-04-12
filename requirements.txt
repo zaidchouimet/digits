@@ -1,0 +1,28 @@
+# Core ML stack
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
+
+# OCR backends
+easyocr>=1.7.0
+pytesseract>=0.3.10
+
+# Benchmarking and evaluation
+jiwer>=3.0.0
+codecarbon>=2.3.1
+psutil>=5.9.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Vision and UI
+opencv-python>=4.8.0
+streamlit>=1.30.0
+
+# Dataset handling
+h5py>=3.8.0
+scipy>=1.10.0
+
+# PaddleOCR is only installed on supported Windows interpreters.
+# The official Windows guidance currently targets Python 3.9-3.13.
+paddleocr; python_version >= '3.9' and python_version < '3.14'
+paddlepaddle; python_version >= '3.9' and python_version < '3.14'
