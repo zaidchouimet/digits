@@ -11,6 +11,7 @@ from recognition import EasyOCRRecognizer, TesseractRecognizer
 from .base_pipeline import BasePipeline, DetectionResult, PipelineResult, RecognitionResult
 from .ocr_only import EasyOCRFullPipeline, TesseractFullPipeline
 from .robust_pipeline import RobustDigitPipeline, RobustOCRPipeline
+from .hybrid_pipeline import HybridDigitPipeline
 
 
 @dataclass(frozen=True)
@@ -22,11 +23,10 @@ class PipelineSpec:
     category: str
     description: str
     builder: Callable[[], BasePipeline]
-    aliases: tuple[str, ...] = ()
+    aliases: tuple = ()
 
 
 def _create_robust_yolo_pipeline(yolo_model: str) -> Callable[[], BasePipeline]:
-    """Factory function for robust YOLO pipelines."""
     def pipeline_factory():
         return RobustDigitPipeline(yolo_model)
     return pipeline_factory
@@ -39,10 +39,18 @@ def _create_yolo_pipeline(yolo_model: str, recognizer_class, recognizer_name: st
         display_name = f"YOLO + {recognizer_name} ({yolo_model})"
         pipeline_id = f"{yolo_model.replace('.pt', '').lower()}_{recognizer_name.lower()}"
         
+        # Use higher confidence thresholds for problematic models
+        if "best" in yolo_model:
+            confidence_threshold = 0.5  # Higher threshold for best.pt
+        elif "yolov8s" in yolo_model:
+            confidence_threshold = 0.7  # Much higher threshold for yolov8s.pt
+        else:
+            confidence_threshold = 0.3  # Default for COCO models
+            
         return BasePipeline(
             pipeline_id=pipeline_id,
             name=display_name,
-            detector=YOLODetector(model_path=yolo_model),
+            detector=YOLODetector(model_path=yolo_model, confidence_threshold=confidence_threshold),
             recognizer=recognizer_class(),
             category="Detection + OCR",
             description=f"YOLO digit detection followed by {recognizer_name} recognition.",
@@ -52,6 +60,7 @@ def _create_yolo_pipeline(yolo_model: str, recognizer_class, recognizer_name: st
 
 
 PIPELINE_SPECS: List[PipelineSpec] = [
+    # ── Standard YOLO pipelines ──────────────────────────────────────────────
     PipelineSpec(
         pipeline_id="yolov8n_tesseract",
         display_name="YOLOv8n + Tesseract",
@@ -66,71 +75,107 @@ PIPELINE_SPECS: List[PipelineSpec] = [
         description="Official YOLOv8n detector with EasyOCR.",
         builder=_create_yolo_pipeline("yolov8n.pt", EasyOCRRecognizer, "EasyOCR"),
     ),
+
+    # ── OCR-only baselines ───────────────────────────────────────────────────
     PipelineSpec(
         pipeline_id="ocr_only_easyocr",
         display_name="EasyOCR (End-to-End)",
         category="OCR-Only Baseline",
-        description="Full-image OCR baseline using EasyOCR.",
+        description="Full-image OCR baseline using EasyOCR with smart pre-cropping.",
         builder=EasyOCRFullPipeline,
     ),
     PipelineSpec(
         pipeline_id="ocr_only_tesseract",
         display_name="Tesseract (End-to-End)",
         category="OCR-Only Baseline",
-        description="Full-image OCR baseline using Tesseract.",
+        description="Full-image OCR baseline using Tesseract with smart pre-cropping.",
         builder=TesseractFullPipeline,
     ),
+
+    # ── Robust pipelines ─────────────────────────────────────────────────────
     PipelineSpec(
         pipeline_id="robust_yolov8n_tesseract",
         display_name="Robust YOLOv8n + Tesseract",
         category="Detection + OCR",
-        description="Enhanced YOLOv8n detector with better uploaded image handling.",
+        description="Enhanced YOLOv8n with full-frame fallback when detection is empty.",
         builder=_create_robust_yolo_pipeline("yolov8n.pt"),
     ),
     PipelineSpec(
         pipeline_id="robust_ocr_only",
         display_name="Robust OCR (End-to-End)",
         category="OCR-Only Baseline",
-        description="Enhanced OCR pipeline optimized for uploaded images.",
+        description="Enhanced OCR pipeline with smart pre-cropping and EasyOCR.",
         builder=RobustOCRPipeline,
         aliases=("robust_ocr",),
     ),
+
+    # ── Custom models ────────────────────────────────────────────────────────
     PipelineSpec(
-        pipeline_id="svhn_best_tesseract",
-        display_name="SVHN Best + Tesseract",
+        pipeline_id="best_tesseract",
+        display_name="Best + Tesseract",
         category="Detection + OCR",
-        description="Custom SVHN-trained YOLO model with Tesseract OCR.",
-        builder=_create_yolo_pipeline("svhn_best.pt", TesseractRecognizer, "Tesseract"),
+        description="Custom best.pt model with Tesseract OCR.",
+        builder=_create_yolo_pipeline("best.pt", TesseractRecognizer, "Tesseract"),
     ),
     PipelineSpec(
-        pipeline_id="svhn_best_easyocr",
-        display_name="SVHN Best + EasyOCR",
+        pipeline_id="best_easyocr",
+        display_name="Best + EasyOCR",
         category="Detection + OCR",
-        description="Custom SVHN-trained YOLO model with EasyOCR OCR.",
-        builder=_create_yolo_pipeline("svhn_best.pt", EasyOCRRecognizer, "EasyOCR"),
+        description="Custom best.pt model with EasyOCR OCR.",
+        builder=_create_yolo_pipeline("best.pt", EasyOCRRecognizer, "EasyOCR"),
     ),
     PipelineSpec(
-        pipeline_id="svhn_detect_best_tesseract", 
-        display_name="SVHN Detect Best + Tesseract",
+        pipeline_id="yolov8s_tesseract",
+        display_name="YOLOv8s + Tesseract",
         category="Detection + OCR",
-        description="Custom SVHN-trained detection model with Tesseract OCR.",
-        builder=_create_yolo_pipeline("svhn_detect_best.pt", TesseractRecognizer, "Tesseract"),
+        description="YOLOv8s model with Tesseract OCR.",
+        builder=_create_yolo_pipeline("yolov8s.pt", TesseractRecognizer, "Tesseract"),
     ),
     PipelineSpec(
-        pipeline_id="svhn_detect_best_easyocr",
-        display_name="SVHN Detect Best + EasyOCR",
-        category="Detection + OCR", 
-        description="Custom SVHN-trained detection model with EasyOCR OCR.",
-        builder=_create_yolo_pipeline("svhn_detect_best.pt", EasyOCRRecognizer, "EasyOCR"),
+        pipeline_id="yolov8s_easyocr",
+        display_name="YOLOv8s + EasyOCR",
+        category="Detection + OCR",
+        description="YOLOv8s model with EasyOCR OCR.",
+        builder=_create_yolo_pipeline("yolov8s.pt", EasyOCRRecognizer, "EasyOCR"),
     ),
-]
+    PipelineSpec(
+        pipeline_id="best1_tesseract",
+        display_name="Best1 + Tesseract",
+        category="Detection + OCR",
+        description="Custom newly synthetic data trained best1.pt model with Tesseract OCR.",
+        builder=_create_yolo_pipeline("best1.pt", TesseractRecognizer, "Tesseract"),
+    ),
+    PipelineSpec(
+        pipeline_id="best1_easyocr",
+        display_name="Best1 + EasyOCR",
+        category="Detection + OCR",
+        description="Custom newly synthetic data trained best1.pt model with EasyOCR OCR.",
+        builder=_create_yolo_pipeline("best1.pt", EasyOCRRecognizer, "EasyOCR"),
+    ),
+
+    # ── Hybrid pipelines (YOLO + OCR fallback) ─────────────────────────────────
+    PipelineSpec(
+        pipeline_id="hybrid_best_easyocr",
+        display_name="Hybrid Best + EasyOCR",
+        category="Detection + OCR",
+        description="Best.pt YOLO with OCR fallback for challenging images.",
+        builder=lambda: HybridDigitPipeline("best.pt", "easyocr"),
+    ),
+    PipelineSpec(
+        pipeline_id="hybrid_best_tesseract",
+        display_name="Hybrid Best + Tesseract",
+        category="Detection + OCR",
+        description="Best.pt YOLO with Tesseract fallback for challenging images.",
+        builder=lambda: HybridDigitPipeline("best.pt", "tesseract"),
+    ),
+    ]
 
 
 def _build_lookup() -> Dict[str, PipelineSpec]:
     lookup: Dict[str, PipelineSpec] = {}
     for spec in PIPELINE_SPECS:
-        lookup[spec.pipeline_id] = spec
-        lookup[spec.display_name] = spec
+        lookup[spec.pipeline_id]   = spec
+        lookup[spec.display_name]  = spec
         for alias in spec.aliases:
             lookup[alias] = spec
     return lookup
@@ -140,31 +185,27 @@ PIPELINE_LOOKUP = _build_lookup()
 
 
 def get_pipeline(pipeline_name: str) -> BasePipeline:
-    """Instantiate a pipeline by ID, alias, or display name."""
     if pipeline_name not in PIPELINE_LOOKUP:
         raise ValueError(
             f"Unknown pipeline: {pipeline_name}. "
-            f"Available IDs: {[spec.pipeline_id for spec in PIPELINE_SPECS]}"
+            f"Available: {[s.pipeline_id for s in PIPELINE_SPECS]}"
         )
     return PIPELINE_LOOKUP[pipeline_name].builder()
 
 
 def get_pipeline_spec(pipeline_name: str) -> PipelineSpec:
-    """Return registry metadata for a pipeline."""
     if pipeline_name not in PIPELINE_LOOKUP:
         raise ValueError(f"Unknown pipeline: {pipeline_name}")
     return PIPELINE_LOOKUP[pipeline_name]
 
 
 def get_available_pipelines(use_display_names: bool = True) -> List[str]:
-    """Return available pipeline identifiers."""
     if use_display_names:
         return [spec.display_name for spec in PIPELINE_SPECS]
     return [spec.pipeline_id for spec in PIPELINE_SPECS]
 
 
 def get_pipeline_categories() -> Dict[str, List[str]]:
-    """Group display names by academic comparison category."""
     categories: Dict[str, List[str]] = {}
     for spec in PIPELINE_SPECS:
         categories.setdefault(spec.category, []).append(spec.display_name)
@@ -172,7 +213,6 @@ def get_pipeline_categories() -> Dict[str, List[str]]:
 
 
 def list_pipeline_specs() -> List[PipelineSpec]:
-    """Return the full registry for CLI and UI rendering."""
     return list(PIPELINE_SPECS)
 
 
