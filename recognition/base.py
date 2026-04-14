@@ -52,13 +52,18 @@ def preprocess_crop_for_ocr(crop: np.ndarray, scale: int = 2) -> np.ndarray:
     # Step 4: Mild denoise
     denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
-    # Step 5: Adaptive threshold — robust to uneven backgrounds (SVHN, photos)
-    # Block size 15, C=10 works well for printed digits
+    # Step 5: DYNAMIC Adaptive threshold
+    # If h > 500, we are likely looking at a full frame, not a small crop.
+    # We increase the block size to ignore fine wall texture.
+    dynamic_block = 15
+    if h > 500:
+        dynamic_block = 71
+
     thresh = cv2.adaptiveThreshold(
         denoised, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        15, 10,
+        dynamic_block, 10,
     )
 
     # Step 6: Light morphological cleanup — fills small holes in digit strokes

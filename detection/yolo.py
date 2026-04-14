@@ -71,5 +71,93 @@ class YOLODetector(BaseDetector):
                 )
             )
 
+        # NEW: Filter false positives for overfitted models
+        detections = self._filter_geometry(detections, frame.shape[:2])
+        detections = self._apply_nms(detections, iou_threshold=0.5)
+        
         detections.sort(key=lambda item: item.x1)
         return detections
+
+    def _filter_geometry(self, detections: List[DetectedBox], img_shape) -> List[DetectedBox]:
+        """Remove detections that don't match digit geometry.
+        
+        Filters out:
+        - Screw holes (too small: < 0.1% of image area)
+        - Text lines (extreme aspect ratios)
+        - Full-plate detections (too large: > 60% of image)
+        """
+        if not detections:
+            return detections
+            
+        h, w = img_shape
+        img_area = h * w
+        filtered: List[DetectedBox] = []
+        
+        for det in detections:
+            box_w = det.x2 - det.x1
+            box_h = det.y2 - det.y1
+            area = box_w * box_h
+            aspect = box_w / max(box_h, 1e-6)
+            
+            # Filter 1: Minimum size (remove screw holes, specks)
+            # Must be at least 0.1% of image or 150px area
+            min_area = max(img_area * 0.001, 150)
+            if area < min_area:
+                continue
+                
+            # Filter 2: Maximum size (remove full-frame detections)
+            if area > img_area * 0.6:
+                continue
+                
+            # Filter 3: Aspect ratio for digits
+            # Digits range from tall/narrow ('1') ~0.3 to wide ~2.0
+            # Text like "Main" has extreme ratios (thin and tall)
+            if not (0.25 <= aspect <= 2.5):
+                continue
+                
+            filtered.append(det)
+        
+        return filtered
+
+    def _apply_nms(self, detections: List[DetectedBox], iou_threshold: float = 0.5) -> List[DetectedBox]:
+        """Non-Maximum Suppression to handle overlapping boxes.
+        
+        Keeps the highest confidence box when detections overlap significantly.
+        This handles cases where '26' is detected both as one box and as two separate boxes.
+        """
+        if not detections:
+            return detections
+            
+        # Sort by confidence (highest first)
+        sorted_dets = sorted(detections, key=lambda x: x.score, reverse=True)
+        keep: List[DetectedBox] = []
+        
+        while sorted_dets:
+            current = sorted_dets.pop(0)
+            keep.append(current)
+            
+            # Remove boxes with high IoU overlap with current
+            remaining = []
+            for det in sorted_dets:
+                if self._iou(current, det) < iou_threshold:
+                    remaining.append(det)
+            sorted_dets = remaining
+        
+        return keep
+
+    def _iou(self, a: DetectedBox, b: DetectedBox) -> float:
+        """Calculate Intersection over Union."""
+        x1 = max(a.x1, b.x1)
+        y1 = max(a.y1, b.y1)
+        x2 = min(a.x2, b.x2)
+        y2 = min(a.y2, b.y2)
+        
+        inter_w = max(0, x2 - x1)
+        inter_h = max(0, y2 - y1)
+        inter_area = inter_w * inter_h
+        
+        area_a = (a.x2 - a.x1) * (a.y2 - a.y1)
+        area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
+        union = area_a + area_b - inter_area
+        
+        return inter_area / union if union > 0 else 0

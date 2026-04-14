@@ -91,7 +91,8 @@ class BasePipeline(ABC):
     def detect(self, frame: np.ndarray) -> DetectionResult:
         """Detect digit regions in the frame."""
         detections = self.detector.detect(frame)
-        detections.sort(key=lambda item: item.x1)
+        # Sort by Y first (top-to-bottom), then X (left-to-right) for multi-row layouts
+        detections.sort(key=lambda item: (item.y1, item.x1))
         return DetectionResult(
             boxes=[detection.as_tuple() for detection in detections],
             scores=[float(detection.score) for detection in detections],

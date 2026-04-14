@@ -62,13 +62,12 @@ class TesseractRecognizer(BaseRecognizer):
 
         recognitions: List[RecognitionOutput] = []
 
-        # PSM waterfall — PSM 13 (raw line) best for short digit strings in photos
         if single_char:
             psm_order = [10, 8]
         else:
-            psm_order = [13, 8, 6, 7]
+            psm_order = [11, 3, 7, 13, 8, 6]
 
-        whitelist = 'tessedit_char_whitelist=0123456789'
+        whitelist = ''
 
         for crop in crops:
             if crop.size == 0:
@@ -79,17 +78,27 @@ class TesseractRecognizer(BaseRecognizer):
             if len(prepared.shape) == 2:
                 prepared = cv2.cvtColor(prepared, cv2.COLOR_GRAY2RGB)
 
-            digits = ''
-            for psm in psm_order:
-                config = f'--oem 3 --psm {psm} -c {whitelist}'
-                try:
-                    raw = self.tesseract_module.image_to_string(prepared, config=config).strip()
-                    candidate = _longest_digit_run(raw)
-                    if candidate:
-                        digits = candidate
-                        break
-                except Exception:
-                    continue
+            def try_tess(img: np.ndarray) -> str:
+                for psm in psm_order:
+                    config = f'--oem 3 --psm {psm}'
+                    if whitelist:
+                        config += f' -c {whitelist}'
+                    try:
+                        raw = self.tesseract_module.image_to_string(img, config=config).strip()
+                        candidate = _longest_digit_run(raw)
+                        if candidate:
+                            return candidate
+                    except Exception:
+                        continue
+                return ''
+
+            # Pass 1: Normal image
+            digits = try_tess(prepared)
+            
+            # Pass 2: Inverted image (essential for white-on-black signs)
+            if not digits:
+                inverted = cv2.bitwise_not(prepared)
+                digits = try_tess(inverted)
 
             confidence = 0.8 if digits else 0.0
             recognitions.append(RecognitionOutput(digits, confidence, crop, self.active_backend_name))

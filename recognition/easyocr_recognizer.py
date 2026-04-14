@@ -7,8 +7,7 @@ from typing import List
 import numpy as np
 import torch
 
-from .base import BaseRecognizer, RecognitionOutput, extract_digit_text, preprocess_crop_for_ocr
-
+from .base import BaseRecognizer, RecognitionOutput, extract_digit_text, preprocess_for_easyocr
 
 # ── Tunable filter constants ──────────────────────────────────────────────────
 # A detected box is kept if it passes EITHER the height test OR the confidence
@@ -106,17 +105,15 @@ class EasyOCRRecognizer(BaseRecognizer):
                 recognitions.append(RecognitionOutput('', 0.0, crop, self.active_backend_name))
                 continue
 
-            prepared  = preprocess_crop_for_ocr(crop)
+            prepared  = preprocess_for_easyocr(crop)
             img_h     = prepared.shape[0]
             text      = ''
             confidence = 0.0
 
             attempts = [
-                dict(allowlist='0123456789', paragraph=False, detail=1,
-                     min_size=5, contrast_ths=0.1, adjust_contrast=0.5),
+                dict(paragraph=False, detail=1, min_size=5, contrast_ths=0.1, adjust_contrast=0.5),
                 dict(allowlist='0123456789', paragraph=False, detail=1),
-                dict(allowlist='0123456789', paragraph=True,  detail=1,
-                     min_size=5, contrast_ths=0.1, adjust_contrast=0.5),
+                dict(paragraph=True, detail=1, min_size=5, contrast_ths=0.1, adjust_contrast=0.5),
             ]
 
             for kwargs in attempts:
