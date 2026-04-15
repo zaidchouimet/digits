@@ -12,10 +12,11 @@ from .base import BaseDetector, DetectedBox
 class YOLODetector(BaseDetector):
     """Digit detector powered by Ultralytics YOLO models."""
 
-    def __init__(self, model_path: str, confidence_threshold: float = 0.15):
+    def __init__(self, model_path: str, confidence_threshold: float = 0.15, is_plate_model: bool = False):
         super().__init__(f"yolo:{model_path}")
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
+        self.is_plate_model = is_plate_model  # skip digit geometry filter for plate detectors
 
     def load(self) -> bool:
         try:
@@ -35,7 +36,9 @@ class YOLODetector(BaseDetector):
             raise RuntimeError(self.last_error or f"Detector {self.name} is not loaded")
 
         try:
-            results = self.model(frame, verbose=False)
+            # Apply threshold at inference time as well; otherwise Ultralytics
+            # default conf may suppress boxes before post-processing sees them.
+            results = self.model(frame, conf=float(self.confidence_threshold), verbose=False)
         except Exception as error:
             raise RuntimeError(f"YOLO detection failed for '{self.model_path}': {error}") from error
 
@@ -71,8 +74,9 @@ class YOLODetector(BaseDetector):
                 )
             )
 
-        # NEW: Filter false positives for overfitted models
-        detections = self._filter_geometry(detections, frame.shape[:2])
+        # Skip geometry filter for plate detectors (wide aspect ratio would be rejected)
+        if not self.is_plate_model:
+            detections = self._filter_geometry(detections, frame.shape[:2])
         detections = self._apply_nms(detections, iou_threshold=0.5)
         
         detections.sort(key=lambda item: item.x1)
@@ -85,6 +89,7 @@ class YOLODetector(BaseDetector):
         - Screw holes (too small: < 0.1% of image area)
         - Text lines (extreme aspect ratios)
         - Full-plate detections (too large: > 60% of image)
+        - Sticker/noise digits much shorter than the main plate digits
         """
         if not detections:
             return detections
@@ -100,7 +105,6 @@ class YOLODetector(BaseDetector):
             aspect = box_w / max(box_h, 1e-6)
             
             # Filter 1: Minimum size (remove screw holes, specks)
-            # Must be at least 0.1% of image or 150px area
             min_area = max(img_area * 0.001, 150)
             if area < min_area:
                 continue
@@ -110,14 +114,22 @@ class YOLODetector(BaseDetector):
                 continue
                 
             # Filter 3: Aspect ratio for digits
-            # Digits range from tall/narrow ('1') ~0.3 to wide ~2.0
-            # Text like "Main" has extreme ratios (thin and tall)
             if not (0.25 <= aspect <= 2.5):
                 continue
                 
             filtered.append(det)
         
+        if not filtered:
+            return filtered
+
+        # Filter 4: Remove boxes much shorter than the tallest detection.
+        # Date stickers and small labels have noticeably shorter bounding boxes
+        # than the main plate digits — keep only boxes >= 45% of the max height.
+        max_h = max(d.y2 - d.y1 for d in filtered)
+        filtered = [d for d in filtered if (d.y2 - d.y1) >= max_h * 0.45]
+
         return filtered
+
 
     def _apply_nms(self, detections: List[DetectedBox], iou_threshold: float = 0.5) -> List[DetectedBox]:
         """Non-Maximum Suppression to handle overlapping boxes.

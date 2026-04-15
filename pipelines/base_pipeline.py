@@ -91,8 +91,30 @@ class BasePipeline(ABC):
     def detect(self, frame: np.ndarray) -> DetectionResult:
         """Detect digit regions in the frame."""
         detections = self.detector.detect(frame)
-        # Sort by Y first (top-to-bottom), then X (left-to-right) for multi-row layouts
-        detections.sort(key=lambda item: (item.y1, item.x1))
+
+        if detections:
+            # 1. Sort top-to-bottom first
+            detections.sort(key=lambda d: d.y1)
+
+            # 2. Group into rows — boxes within 40% of the average height are on the same line
+            rows: list = []
+            current_row = [detections[0]]
+            for d in detections[1:]:
+                ref_h = current_row[0].y2 - current_row[0].y1
+                if abs(d.y1 - current_row[0].y1) < ref_h * 0.4:
+                    current_row.append(d)
+                else:
+                    rows.append(current_row)
+                    current_row = [d]
+            rows.append(current_row)
+
+            # 3. Sort each row left-to-right
+            sorted_detections = []
+            for row in rows:
+                row.sort(key=lambda d: d.x1)
+                sorted_detections.extend(row)
+            detections = sorted_detections
+
         return DetectionResult(
             boxes=[detection.as_tuple() for detection in detections],
             scores=[float(detection.score) for detection in detections],
@@ -102,7 +124,10 @@ class BasePipeline(ABC):
 
     def recognize(self, crops: List[np.ndarray]) -> List[RecognitionResult]:
         """Recognize digits from a batch of cropped regions."""
-        single_char = not isinstance(self.detector, FullFrameDetector)
+        # single_char=True only for digit-level detectors (one box = one digit).
+        # Plate detectors return one box = entire plate, so OCR must read all chars.
+        is_plate = getattr(self.detector, "is_plate_model", False)
+        single_char = not isinstance(self.detector, FullFrameDetector) and not is_plate
         outputs = self.recognizer.recognize_batch(crops, single_char=single_char)
         return [
             RecognitionResult(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 import numpy as np
 
@@ -101,12 +101,26 @@ class BenchmarkSummary:
 class BenchmarkRunner:
     """Run a benchmark over a set of labeled digit samples."""
 
-    def __init__(self, progress_callback: Optional[Callable[[int, int], None]] = None):
+    def __init__(
+        self,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        sample_callback: Optional[Callable[[int, int, BenchmarkSample, PipelineResult], None]] = None,
+    ):
         self.progress_callback = progress_callback
+        self.sample_callback = sample_callback
 
-    def run(self, pipeline, samples: List[BenchmarkSample], condition: str, data_source: str) -> BenchmarkSummary:
-        if not samples:
-            raise ValueError("No samples were provided to the benchmark runner.")
+    def run(
+        self,
+        pipeline,
+        samples: Iterable[BenchmarkSample],
+        condition: str,
+        data_source: str,
+        total_samples: Optional[int] = None,
+        stream_skip_empty_frames: bool = False,
+        adaptive_streaming: bool = False,
+        target_fps: float = 10.0,
+        max_adaptive_skip: int = 10,
+    ) -> BenchmarkSummary:
 
         tracker = BenchmarkTracker(project_name=f"digit_benchmark_{pipeline.pipeline_id}")
         tracker.start_benchmark()
@@ -117,10 +131,49 @@ class BenchmarkRunner:
         scored_predictions: List[str] = []
         per_sample: List[SamplePrediction] = []
 
+        processed_count = 0
+        stream_started_at = datetime.utcnow().timestamp()
+        adaptive_skip = 0
+        skip_budget = 0
         for index, sample in enumerate(samples, start=1):
+            if adaptive_streaming and skip_budget > 0:
+                skip_budget -= 1
+                if self.progress_callback:
+                    progress_total = total_samples if total_samples and total_samples > 0 else index
+                    self.progress_callback(index, progress_total)
+                continue
+
             processed_image = apply_image_conditions(sample.image, condition)
+
+            if stream_skip_empty_frames:
+                try:
+                    quick_detections = pipeline.detector.detect(processed_image)
+                    if not quick_detections:
+                        if self.progress_callback:
+                            progress_total = total_samples if total_samples and total_samples > 0 else index
+                            self.progress_callback(index, progress_total)
+                        continue
+                except Exception:
+                    # If quick detection fails, continue with full pipeline path.
+                    pass
+
             result = pipeline.run(processed_image)
             prediction = result.full_text
+            processed_count += 1
+
+            elapsed = max(datetime.utcnow().timestamp() - stream_started_at, 1e-6)
+            realtime_fps = processed_count / elapsed
+
+            if adaptive_streaming:
+                if realtime_fps < target_fps * 0.8:
+                    adaptive_skip = min(adaptive_skip + 1, max(max_adaptive_skip, 0))
+                elif realtime_fps > target_fps * 1.2:
+                    adaptive_skip = max(adaptive_skip - 1, 0)
+                skip_budget = adaptive_skip
+
+            result.metadata["realtime_fps"] = realtime_fps
+            result.metadata["adaptive_skip"] = adaptive_skip
+            result.metadata["target_fps"] = target_fps
 
             ground_truths.append(sample.ground_truth)
             predictions.append(prediction)
@@ -156,7 +209,14 @@ class BenchmarkRunner:
             )
 
             if self.progress_callback:
-                self.progress_callback(index, len(samples))
+                progress_total = total_samples if total_samples and total_samples > 0 else index
+                self.progress_callback(index, progress_total)
+            if self.sample_callback:
+                sample_total = total_samples if total_samples and total_samples > 0 else index
+                self.sample_callback(processed_count, sample_total, sample, result)
+
+        if processed_count == 0:
+            raise ValueError("No samples were provided to the benchmark runner.")
 
         performance = tracker.stop_benchmark()
         metrics = (
@@ -179,7 +239,7 @@ class BenchmarkRunner:
             recognizer_backend=pipeline.recognizer.active_backend_name,
             data_source=data_source,
             condition=condition,
-            num_samples=len(samples),
+            num_samples=processed_count,
             evaluated_samples=len(scored_ground_truths),
             avg_fps=performance.avg_fps,
             avg_latency_ms=float(np.mean(latencies_ms)) if latencies_ms else 0.0,

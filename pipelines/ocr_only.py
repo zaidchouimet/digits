@@ -110,7 +110,7 @@ def _contrast_plate_crop(image: np.ndarray) -> np.ndarray | None:
         mean_bright = float(region_orig.mean())
         # Lowered from 100 → 80 so yellow plates (~98) are not rejected
         if mean_bright < 60:
-            continue
+            continuez
 
         region_gray = gray[y:y + ch, x:x + cw]
         std   = float(region_gray.std())

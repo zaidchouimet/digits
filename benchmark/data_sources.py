@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, Iterator, List, Optional
 
 import cv2
 import numpy as np
@@ -101,6 +101,75 @@ def load_streamlit_upload_samples(uploaded_files, ground_truth_input: str) -> Li
     return samples
 
 
+def load_video_samples(
+    video_path: str,
+    max_frames: int = 50,
+    frame_stride: int = 1,
+    source_name: str = "video",
+) -> List[BenchmarkSample]:
+    """Load evenly sampled frames from a video file as benchmark samples."""
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+
+    samples: List[BenchmarkSample] = []
+    frame_index = 0
+    kept_index = 0
+
+    while kept_index < max_frames:
+        success, frame = capture.read()
+        if not success:
+            break
+
+        if frame_index % max(frame_stride, 1) == 0:
+            samples.append(
+                BenchmarkSample(
+                    image=frame,
+                    ground_truth="",
+                    sample_id=f"{source_name}_{kept_index:04d}",
+                    source=source_name,
+                )
+            )
+            kept_index += 1
+        frame_index += 1
+
+    capture.release()
+    return samples
+
+
+def iter_video_samples(
+    video_path: str,
+    max_frames: int = 50,
+    frame_stride: int = 1,
+    source_name: str = "video",
+) -> Iterator[BenchmarkSample]:
+    """Yield evenly sampled frames from a video file as benchmark samples."""
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+
+    frame_index = 0
+    kept_index = 0
+
+    try:
+        while kept_index < max_frames:
+            success, frame = capture.read()
+            if not success:
+                break
+
+            if frame_index % max(frame_stride, 1) == 0:
+                yield BenchmarkSample(
+                    image=frame,
+                    ground_truth="",
+                    sample_id=f"{source_name}_{kept_index:04d}",
+                    source=source_name,
+                )
+                kept_index += 1
+            frame_index += 1
+    finally:
+        capture.release()
+
+
 def load_directory_samples(image_dir: str, label_file: Optional[str] = None) -> List[BenchmarkSample]:
     """Load CLI image directory samples."""
     dataset = CustomDigitDataset()
@@ -151,4 +220,87 @@ def load_svhn_format1_samples(split: str, dataset_size: int, target_size: int = 
                 source=f"svhn_format1_{split}",
             )
         )
+    return samples
+
+
+def load_dataset_dataset_samples(
+    split: str = "test",
+    dataset_size: int = 50,
+    dataset_dir: str = "datasets/dataset",
+    target_size: int = 256,
+) -> List[BenchmarkSample]:
+    """Load samples from datasets/dataset using labels/*.txt and matching images.
+
+    Label file format (per image):
+    - line 1: ground-truth text
+    - line 2+: optional metadata (ignored by benchmark loader)
+    """
+    root = Path(dataset_dir)
+    labels_dir = root / "labels"
+    candidate_image_dirs = [root / "images", root]
+    image_exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+    if not labels_dir.exists():
+        raise FileNotFoundError(f"Labels directory not found: {labels_dir}")
+
+    label_files = sorted(labels_dir.glob("*.txt"))
+    if not label_files:
+        raise ValueError(f"No label files found in {labels_dir}")
+
+    records = []
+    for label_path in label_files:
+        stem = label_path.stem
+        image_path = None
+        for image_dir in candidate_image_dirs:
+            for ext in image_exts:
+                candidate = image_dir / f"{stem}{ext}"
+                if candidate.exists():
+                    image_path = candidate
+                    break
+            if image_path is not None:
+                break
+
+        # Skip labels that have no matching image file
+        if image_path is None:
+            continue
+
+        label_lines = label_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        ground_truth = label_lines[0].strip() if label_lines else ""
+        records.append((image_path, ground_truth))
+
+    if not records:
+        raise ValueError(
+            "No image/label pairs found in datasets/dataset. "
+            "Expected images in datasets/dataset or datasets/dataset/images "
+            "with matching names to labels/*.txt."
+        )
+
+    # Deterministic split similar to train/test behavior in SVHN loaders
+    split = split.lower()
+    split_index = max(1, int(len(records) * 0.8))
+    if split == "train":
+        split_records = records[:split_index]
+    elif split == "test":
+        split_records = records[split_index:]
+    else:
+        raise ValueError(f"Unsupported split: {split}. Expected 'train' or 'test'.")
+
+    if dataset_size is not None and dataset_size > 0:
+        split_records = split_records[:dataset_size]
+
+    samples: List[BenchmarkSample] = []
+    for index, (image_path, ground_truth) in enumerate(split_records):
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        resized = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
+        samples.append(
+            BenchmarkSample(
+                image=resized,
+                ground_truth=str(ground_truth),
+                sample_id=f"dataset_{split}_{index:04d}",
+                source=f"dataset_{split}",
+            )
+        )
+
     return samples

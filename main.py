@@ -5,19 +5,23 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
+import tempfile
 import sys
 from typing import List
 
-from benchmark import (
-    BenchmarkRunner,
-    append_benchmark_summary,
-    load_benchmark_table,
+from benchmark.data_sources import (
+    iter_video_samples,
+    load_dataset_dataset_samples,
     load_directory_samples,
     load_sample_video_samples,
     load_streamlit_upload_samples,
     load_svhn_samples,
     load_svhn_format1_samples,
 )
+from benchmark import data_sources as benchmark_data_sources
+from benchmark.runner import BenchmarkRunner
+from benchmark.storage import append_benchmark_summary, load_benchmark_table
 from pipelines import get_pipeline, get_pipeline_categories, get_pipeline_spec, list_pipeline_specs
 
 
@@ -64,7 +68,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-source",
         default="svhn_format1",
-        choices=["svhn_format1", "images"],
+        choices=["svhn_format1", "dataset", "images", "video"],
         help="Benchmark source.",
     )
     parser.add_argument(
@@ -81,6 +85,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="SVHN split used during benchmarking.",
     )
     parser.add_argument("--image-dir", help="Directory containing input images for --data-source images.")
+    parser.add_argument("--video-path", help="Path to a video file when --data-source video is selected.")
+    parser.add_argument("--max-frames", type=int, default=50, help="Maximum video frames to benchmark.")
+    parser.add_argument("--frame-stride", type=int, default=1, help="Keep every Nth frame from the video.")
     parser.add_argument("--label-file", help="Optional CSV file with image_name,label columns.")
     parser.add_argument("--output-csv", default="results.csv", help="CSV file used to append benchmark results.")
     parser.add_argument("--list-pipelines", action="store_true", help="List available pipeline IDs and exit.")
@@ -91,10 +98,21 @@ def get_cli_samples(args: argparse.Namespace) -> List[BenchmarkSample]:
     """Load samples for requested CLI data source."""
     if args.data_source == "svhn_format1":
         return load_svhn_format1_samples(split=args.svhn_split, dataset_size=args.svhn_size)
+    if args.data_source == "dataset":
+        return load_dataset_dataset_samples(split=args.svhn_split, dataset_size=args.svhn_size)
     if args.data_source == "images":
         if not args.image_dir:
             raise ValueError("--image-dir is required when --data-source images is selected.")
         return load_directory_samples(args.image_dir, label_file=args.label_file)
+    if args.data_source == "video":
+        if not args.video_path:
+            raise ValueError("--video-path is required when --data-source video is selected.")
+        return benchmark_data_sources.load_video_samples(
+            video_path=args.video_path,
+            max_frames=args.max_frames,
+            frame_stride=args.frame_stride,
+            source_name="video_cli",
+        )
     raise ValueError(f"Unsupported data source: {args.data_source}")
 
 
@@ -198,12 +216,21 @@ def render_streamlit_app() -> None:
         st.caption(pipeline_spec.description)
 
 
-        data_source = st.radio("Data Source", options=["Upload Images", "SVHN Format 1"])
+        data_source = st.radio("Data Source", options=["Upload Images", "Upload Video", "SVHN Format 1", "Dataset Folder"])
         condition = st.selectbox("Condition", options=["clean", "blurry", "noisy", "low_contrast"])
 
         dataset_size = 50
         dataset_split = "test"
         uploaded_files = []
+        uploaded_video = None
+        max_frames = 50
+        frame_stride = 1
+        live_preview = False
+        preview_every_n = 1
+        skip_empty_video_frames = True
+        adaptive_streaming = True
+        target_stream_fps = 12
+        max_adaptive_skip = 8
         ground_truth_input = ""
 
         if data_source == "SVHN Format 1":
@@ -218,6 +245,13 @@ def render_streamlit_app() -> None:
                 st.info(f"Training set: 73,257 samples with digit labels 0-9")
             else:
                 st.info(f"Test set: 26,032 samples with digit labels 0-9")
+        elif data_source == "Dataset Folder":
+            st.markdown("**Dataset Folder (datasets/dataset)**")
+            st.caption("Uses datasets/dataset/labels/*.txt with matching image filenames.")
+
+            dataset_size = st.selectbox("Dataset Size", options=[10, 50, 100, 500], index=1)
+            dataset_split = st.selectbox("Dataset Split", options=["test", "train"], index=0)
+            st.info("Split is deterministic: first 80% train, last 20% test.")
         elif data_source == "Upload Images":
             uploaded_files = st.file_uploader(
                 "Upload Images",
@@ -228,14 +262,39 @@ def render_streamlit_app() -> None:
                 "Ground Truth (comma-separated)",
                 placeholder="01234, 56789",
             )
+        elif data_source == "Upload Video":
+            uploaded_video = st.file_uploader(
+                "Upload Video",
+                type=["mp4", "avi", "mov", "mkv", "webm"],
+                accept_multiple_files=False,
+            )
+            max_frames = st.selectbox("Max Frames", options=[10, 25, 50, 100, 200], index=2)
+            frame_stride = st.selectbox("Frame Stride", options=[1, 2, 3, 5, 10], index=0)
+            skip_empty_video_frames = st.checkbox(
+                "Ignore frames with no detections (faster stream)",
+                value=True,
+            )
+            adaptive_streaming = st.checkbox(
+                "Adaptive real-time streaming (dynamic frame skipping)",
+                value=True,
+            )
+            if adaptive_streaming:
+                target_stream_fps = st.slider("Target Stream FPS", min_value=5, max_value=30, value=12, step=1)
+                max_adaptive_skip = st.slider("Max Adaptive Frame Skip", min_value=1, max_value=20, value=8, step=1)
+            live_preview = st.checkbox("Live Stream Preview", value=True)
+            if live_preview:
+                preview_every_n = st.selectbox("Preview Every N Processed Frames", options=[1, 2, 3, 5, 10], index=0)
+            st.caption("Processes frames without labels (metrics like CER/WER will show N/A).")
 
         run_button = st.button("Run Benchmark", type="primary")
 
     summary = st.session_state.get("benchmark_summary")
 
     if run_button:
+        temp_video_path_for_cleanup = None
         try:
             pipeline = load_pipeline_cached(pipeline_name)
+            total_samples = None
             if data_source == "Sample Video":
                 samples = load_sample_video_samples(limit=50)
                 source_name = "sample_video"
@@ -253,19 +312,75 @@ def render_streamlit_app() -> None:
             elif data_source == "SVHN Format 1":
                 samples = load_svhn_format1_samples(split=dataset_split, dataset_size=dataset_size)
                 source_name = f"svhn_format1_{dataset_split}"
+            elif data_source == "Dataset Folder":
+                samples = load_dataset_dataset_samples(split=dataset_split, dataset_size=dataset_size)
+                source_name = f"dataset_{dataset_split}"
+            elif data_source == "Upload Video":
+                if not uploaded_video:
+                    st.error("Please upload a video.")
+                    return
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uploaded_video.name}") as temp_video:
+                    temp_video.write(uploaded_video.getbuffer())
+                    temp_video_path = temp_video.name
+                temp_video_path_for_cleanup = temp_video_path
+                samples = iter_video_samples(
+                    video_path=temp_video_path,
+                    max_frames=max_frames,
+                    frame_stride=frame_stride,
+                    source_name="uploaded_video",
+                )
+                total_samples = max_frames
+                source_name = "uploaded_video"
             else:
                 samples = load_svhn_samples(split=dataset_split, dataset_size=dataset_size)
                 source_name = f"svhn_{dataset_split}"
 
             progress_bar = st.progress(0.0)
             status = st.empty()
+            preview_area = st.empty() if data_source == "Upload Video" and live_preview else None
+            preview_text = st.empty() if data_source == "Upload Video" and live_preview else None
 
             def on_progress(current: int, total: int) -> None:
-                progress_bar.progress(current / total)
+                safe_total = max(total, 1)
+                progress_bar.progress(min(current / safe_total, 1.0))
                 status.write(f"Processing sample {current}/{total}")
 
-            runner = BenchmarkRunner(progress_callback=on_progress)
-            summary = runner.run(pipeline, samples, condition=condition, data_source=source_name)
+            def on_sample(current: int, total: int, sample, result) -> None:
+                if preview_area is None or preview_text is None:
+                    return
+                if current % max(preview_every_n, 1) != 0:
+                    return
+                image_rgb = cv2.cvtColor(result.annotated_image, cv2.COLOR_BGR2RGB)
+                preview_area.image(
+                    image_rgb,
+                    caption=f"Live stream preview ({current}/{total})",
+                    use_container_width=True,
+                )
+                realtime_fps = result.metadata.get("realtime_fps", 0.0)
+                adaptive_skip = int(result.metadata.get("adaptive_skip", 0))
+                target_fps = float(result.metadata.get("target_fps", target_stream_fps))
+                preview_text.markdown(
+                    f"**Current OCR:** `{result.full_text or '(empty)'}`  \n"
+                    f"**Realtime FPS:** `{realtime_fps:.2f}` / target `{target_fps:.1f}`  \n"
+                    f"**Adaptive Skip:** `{adaptive_skip}`"
+                )
+
+            try:
+                runner = BenchmarkRunner(progress_callback=on_progress, sample_callback=on_sample)
+            except TypeError:
+                # Backward compatibility if an older BenchmarkRunner signature is loaded.
+                runner = BenchmarkRunner(progress_callback=on_progress)
+            summary = runner.run(
+                pipeline,
+                samples,
+                condition=condition,
+                data_source=source_name,
+                total_samples=total_samples,
+                stream_skip_empty_frames=(data_source == "Upload Video" and skip_empty_video_frames),
+                adaptive_streaming=(data_source == "Upload Video" and adaptive_streaming),
+                target_fps=float(target_stream_fps),
+                max_adaptive_skip=int(max_adaptive_skip),
+            )
             output_path = append_benchmark_summary(summary)
             st.session_state["benchmark_summary"] = summary
             progress_bar.progress(1.0)
@@ -283,6 +398,12 @@ def render_streamlit_app() -> None:
             
             with st.expander("Show detailed traceback"):
                 st.code(traceback.format_exc(), language="python")
+        finally:
+            if temp_video_path_for_cleanup:
+                try:
+                    os.unlink(temp_video_path_for_cleanup)
+                except OSError:
+                    pass
 
     left_col, right_col = st.columns([3, 2])
     with left_col:
