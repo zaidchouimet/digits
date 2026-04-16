@@ -36,11 +36,14 @@ class YOLOOnlyPipeline(BasePipeline):
         pipeline_id = f"{yolo_model.replace('.pt', '').lower()}_only"
 
         is_plate_model = False
+        inference_imgsz = None
         if "best2" in yolo_model:
             confidence_threshold = 0.20
         elif "best3" in yolo_model:
             confidence_threshold = 0.05
             is_plate_model = True
+            # best3 often misses small/distant plates at default input size.
+            inference_imgsz = 1280
         elif "best1" in yolo_model:
             confidence_threshold = 0.50
         elif "best" in yolo_model:
@@ -58,6 +61,7 @@ class YOLOOnlyPipeline(BasePipeline):
                 model_path=yolo_model,
                 confidence_threshold=confidence_threshold,
                 is_plate_model=is_plate_model,
+                inference_imgsz=inference_imgsz,
             ),
             recognizer=DummyRecognizer(),
             category="Detection Only",

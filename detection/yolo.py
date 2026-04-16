@@ -12,11 +12,18 @@ from .base import BaseDetector, DetectedBox
 class YOLODetector(BaseDetector):
     """Digit detector powered by Ultralytics YOLO models."""
 
-    def __init__(self, model_path: str, confidence_threshold: float = 0.15, is_plate_model: bool = False):
+    def __init__(
+        self,
+        model_path: str,
+        confidence_threshold: float = 0.15,
+        is_plate_model: bool = False,
+        inference_imgsz: int | None = None,
+    ):
         super().__init__(f"yolo:{model_path}")
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
         self.is_plate_model = is_plate_model  # skip digit geometry filter for plate detectors
+        self.inference_imgsz = inference_imgsz
 
     def load(self) -> bool:
         try:
@@ -38,7 +45,13 @@ class YOLODetector(BaseDetector):
         try:
             # Apply threshold at inference time as well; otherwise Ultralytics
             # default conf may suppress boxes before post-processing sees them.
-            results = self.model(frame, conf=float(self.confidence_threshold), verbose=False)
+            inference_kwargs = {
+                "conf": float(self.confidence_threshold),
+                "verbose": False,
+            }
+            if self.inference_imgsz:
+                inference_kwargs["imgsz"] = int(self.inference_imgsz)
+            results = self.model(frame, **inference_kwargs)
         except Exception as error:
             raise RuntimeError(f"YOLO detection failed for '{self.model_path}': {error}") from error
 

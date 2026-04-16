@@ -13,6 +13,7 @@ from .ocr_only import EasyOCRFullPipeline, TesseractFullPipeline
 from .robust_pipeline import RobustDigitPipeline, RobustOCRPipeline
 from .hybrid_pipeline import HybridDigitPipeline
 from .yolo_only import YOLOOnlyPipeline
+from .cascade_pipeline import CascadePlatePipeline
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ def _create_yolo_pipeline(yolo_model: str, recognizer_class, recognizer_name: st
 
         # Confidence thresholds and detector flags tuned per model
         is_plate_model = False
+        inference_imgsz = None
         if "best2" in yolo_model:
             # SVHN fine-tuned, only 5 epochs → lower threshold to catch more detections
             confidence_threshold = 0.20
@@ -49,6 +51,8 @@ def _create_yolo_pipeline(yolo_model: str, recognizer_class, recognizer_name: st
             # best3 behaves like plate-level detector; skip digit geometry filtering
             confidence_threshold = 0.05
             is_plate_model = True
+            # Use larger inference size for small/distant plate recall.
+            inference_imgsz = 1280
         elif "best1" in yolo_model:
             # Synthetic-trained, overfitted → higher threshold reduces false positives
             confidence_threshold = 0.50
@@ -68,6 +72,7 @@ def _create_yolo_pipeline(yolo_model: str, recognizer_class, recognizer_name: st
                 model_path=yolo_model,
                 confidence_threshold=confidence_threshold,
                 is_plate_model=is_plate_model,
+                inference_imgsz=inference_imgsz,
             ),
             recognizer=recognizer_class(),
             category="Detection + OCR",
@@ -224,6 +229,20 @@ PIPELINE_SPECS: List[PipelineSpec] = [
         description="Custom YOLOv8n (best3.pt) without OCR.",
         builder=lambda: YOLOOnlyPipeline("best3.pt"),
     ),
+    PipelineSpec(
+        pipeline_id="cascade_best3_best2",
+        display_name="Cascade: Best3 Plate + Best2 Digits",
+        category="Detection + OCR",
+        description="Two-stage: best3 detects plates, best2 reads digits class-by-class.",
+        builder=lambda: CascadePlatePipeline("best2.pt", digit_confidence_threshold=0.20),
+    ),
+    PipelineSpec(
+        pipeline_id="cascade_best3_best1",
+        display_name="Cascade: Best3 Plate + Best1 Digits",
+        category="Detection + OCR",
+        description="Two-stage: best3 detects plates, best1 reads digits class-by-class.",
+        builder=lambda: CascadePlatePipeline("best1.pt", digit_confidence_threshold=0.50),
+    ),
 
     # ── Hybrid pipelines ──────────────────────────────────────────────────────
     PipelineSpec(
@@ -298,6 +317,7 @@ __all__ = [
     "RobustDigitPipeline",
     "RobustOCRPipeline",
     "YOLOOnlyPipeline",
+    "CascadePlatePipeline",
     "PipelineSpec",
     "get_pipeline",
     "get_pipeline_spec",
